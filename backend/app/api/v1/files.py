@@ -233,4 +233,163 @@ async def share_file(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Sharing failed: {str(e)}"
+        )@router.post("/download", response_class=StreamingResponse)
+async def download_files_as_zip(
+    file_ids: List[str],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Download multiple files as a ZIP archive."""
+    try:
+        # Verify access and collect file paths
+        file_paths = []
+        for file_id in file_ids:
+            document = await db.get(Document, file_id)
+            if not document or document.owner_id != current_user.id:
+                continue
+            if Path(document.storage_path).exists():
+                file_paths.append(document.storage_path)
+
+        if not file_paths:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No accessible files found"
+            )
+
+        # Create in-memory ZIP file
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            for file_path in file_paths:
+                zip_file.write(file_path, Path(file_path).name)
+
+        zip_buffer.seek(0)
+        
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": "attachment; filename=download.zip",
+                "Content-Length": str(zip_buffer.getbuffer().nbytes)
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to create ZIP download: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+@router.post("/{file_id}/copy", response_model=FileOperationResponse)
+async def copy_file(
+    file_id: str,
+    target_path: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Copy a file to a new location."""
+    document = await db.get(Document, file_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    try:
+        new_path = file_service.copy_file(document.storage_path, target_path)
+        return {
+            "success": True,
+            "message": "File copied successfully",
+            "details": {"new_path": new_path}
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+@router.post("/{file_id}/move", response_model=FileOperationResponse)
+async def move_file(
+    file_id: str,
+    target_path: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Move a file to a new location."""
+    document = await db.get(Document, file_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    try:
+        new_path = file_service.move_file(document.storage_path, target_path)
+        return {
+            "success": True,
+            "message": "File moved successfully",
+            "details": {"new_path": new_path}
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+@router.post("/{file_id}/rename", response_model=FileOperationResponse)
+async def rename_file(
+    file_id: str,
+    new_name: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Rename a file."""
+    document = await db.get(Document, file_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    try:
+        new_path = file_service.rename_file(
+            document.storage_path,
+            new_name
+        )
+        return {
+            "success": True,
+            "message": "File renamed successfully",
+            "details": {"new_path": new_path}
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+@router.post("/{file_id}/resolve-conflict", response_model=FileConflictResolution)
+async def resolve_file_conflict(
+    file_id: str,
+    strategy: FileConflictStrategy,
+    backup: bool = True,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Resolve a file version conflict."""
+    document = await db.get(Document, file_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    try:
+        result = version_service.resolve_conflict(
+            document.storage_path,
+            strategy,
+            create_backup=backup
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )
