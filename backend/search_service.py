@@ -153,7 +153,8 @@ class SearchService(BaseService):
         query: str,
         limit: int = 10,
         filters: Optional[Dict] = None,
-        facets: Optional[List[str]] = None
+        facets: Optional[List[str]] = None,
+        user_id: Optional[int] = None
     ) -> List[Dict]:
         """Perform hybrid search with advanced capabilities.
         
