@@ -1,8 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from search_service import SearchService
 from celery import Celery
 from .celery import app as celery_app
+from utils.validate import validate_search_mode
 
 app = FastAPI(
     title="File Manager API",
@@ -54,8 +55,11 @@ async def hybrid_search(
     - mode: Search mode (hybrid/keyword/vector)
     - limit: Maximum number of results to return
     """
-    if mode not in ["hybrid", "keyword", "vector"]:
-        return {"error": "Invalid search mode"}
+    if not validate_search_mode(mode):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid search mode. Must be one of: hybrid, keyword, vector"
+        )
         
     results = await search_service.hybrid_search(query, limit)
     return {"results": results}
