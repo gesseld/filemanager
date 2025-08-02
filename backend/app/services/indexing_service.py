@@ -1,268 +1,153 @@
-"""Indexing service for text extraction using Apache Tika."""
+"""Document indexing service."""
 
-import os
-import json
-import tempfile
-from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
-import requests
-from loguru import logger
+import logging
+from typing import Optional, List, Dict
+from datetime import datetime
 
-from app.core.config import settings
-
-
-class IndexingService:
-    """Service for extracting text and metadata from documents using Apache Tika."""
-    
-    def __init__(self):
-        """Initialize indexing service with Tika configuration."""
-        self.tika_url = settings.tika_url
-        self.timeout = 300  # 5 minutes timeout for large files
-        
-    async def extract_text(self, file_path: str, mime_type: str) -> Tuple[str, Dict[str, Any]]:
-        """
-        Extract text and metadata from a document using Apache Tika.
-        
-        Args:
-            file_path: Path to the file to extract text from
-            mime_type: MIME type of the file
-            
-        Returns:
-            Tuple of (extracted_text, metadata_dict)
-            
-        Raises:
-            Exception: If text extraction fails
-        """
-        try:
-            # Check if Tika server is available
-            if not self._check_tika_health():
-                raise Exception("Tika server is not available")
-            
-            # Prepare file for Tika
-            with open(file_path, 'rb') as file:
-                files = {'file': file}
-                headers = {
-                    'Accept': 'application/json',
-                    'Content-Type': mime_type
-                }
-                
-                # Call Tika for text extraction
-                response = requests.post(
-                    f"{self.tika_url}/tika",
-                    files=files,
-                    headers=headers,
-                    timeout=self.timeout
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"Tika extraction failed: {response.status_code}")
-                
-                extracted_text = response.text.strip()
-                
-                # Get metadata
-                metadata = await self._extract_metadata(file_path, mime_type)
-                
-                logger.info(
-                    f"Successfully extracted text from {file_path} "
-                    f"(length: {len(extracted_text)} chars)"
-                )
-                
-                return extracted_text, metadata
-                
-        except Exception as e:
-            logger.error(f"Error extracting text from {file_path}: {e}")
-            raise
-    
-    async def _extract_metadata(self, file_path: str, mime_type: str) -> Dict[str, Any]:
-        """
-        Extract metadata from a document using Apache Tika.
-        
-        Args:
-            file_path: Path to the file
-            mime_type: MIME type of the file
-            
-        Returns:
-            Dictionary containing metadata
-        """
-        try:
-            with open(file_path, 'rb') as file:
-                files = {'file': file}
-                headers = {
-                    'Accept': 'application/json',
-                    'Content-Type': mime_type
-                }
-                
-                response = requests.put(
-                    f"{self.tika_url}/meta",
-                    files=files,
-                    headers=headers,
-                    timeout=self.timeout
-                )
-                
-                if response.status_code == 200:
-                    metadata = response.json()
-                    # Clean up metadata - remove empty values and binary data
-                    cleaned_metadata = {}
-                    for key, value in metadata.items():
-                        if value and not key.startswith('X-TIKA'):
-                            if isinstance(value, (str, int, float, bool)):
-                                cleaned_metadata[key] = value
-                            elif isinstance(value, list) and value:
-                                cleaned_metadata[key] = value
-                    
-                    return cleaned_metadata
-                else:
-                    logger.warning(f"Failed to extract metadata: {response.status_code}")
-                    return {}
-                    
-        except Exception as e:
-            logger.error(f"Error extracting metadata: {e}")
-            return {}
-    
-    def _check_tika_health(self) -> bool:
-        """Check if Tika server is healthy and available."""
-        try:
-            response = requests.get(
-                f"{self.tika_url}/tika",
-                timeout=10
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
-    
-    def is_supported_type(self, mime_type: str) -> bool:
-        """Check if the MIME type is supported by Tika."""
-        supported_types = {
-            'application/pdf',
-            'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/vnd.ms-excel',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'application/vnd.ms-powerpoint',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'text/plain',
-            'text/html',
-            'text/xml',
-            'text/csv',
-            'application/json',
-            'application/xml',
-            'application/rtf',
-            'application/epub+zip',
-            'application/zip',
-            'application/x-tar',
-            'application/gzip',
-            'application/x-bzip2',
-            'application/x-7z-compressed',
-            'application/x-rar-compressed',
-        }
-        
-        # Add image types that Tika can extract text from
-        supported_types.update({
-            'image/jpeg',
-            'image/png',
-            'image/tiff',
-            'image/bmp',
-            'image/gif',
-            'image/webp',
-        })
-        
-        return mime_type in supported_types
-
-
-# Document model import
-from backend.app.models.document import Document
-
-# Global indexing service instance
-
-# Qdrant client setup
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
-qdrant_client = QdrantClient(
-    host=settings.qdrant_host,
-    port=settings.qdrant_port,
-    api_key=settings.qdrant_api_key,
-    timeout=settings.qdrant_timeout
-)
+from ..config import settings
+from ..models.document import Document
+from ..exceptions import IndexingError
 
-# Meilisearch client setup
-from meilisearch import Client as MeilisearchClient
+logger = logging.getLogger(__name__)
 
-meilisearch_client = MeilisearchClient(
-    f"http://{settings.meilisearch_host}:{settings.meilisearch_port}",
-    settings.meilisearch_api_key
-)
-
-class SearchService:
-    """Service for managing document search indexes."""
+class IndexingService:
+    """Service for document indexing operations."""
     
     def __init__(self):
-        """Initialize search service clients."""
-        self.qdrant = qdrant_client
-        self.meilisearch = meilisearch_client
+        self.client = QdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY,
+            timeout=settings.QDRANT_TIMEOUT
+        )
+        self.collection_name = settings.QDRANT_COLLECTION
+        self.vector_size = settings.EMBEDDING_SIZE
         
-    async def index_document(self, document: Document, text: str):
-        """Index document in both Qdrant and Meilisearch."""
-        from loguru import logger
-        
+    def ensure_collection_exists(self) -> None:
+        """Ensure the Qdrant collection exists."""
         try:
-            # Qdrant vector index
-            vector = await self._get_document_embedding(text)
-            self.qdrant.upsert(
-                collection_name="documents",
+            collections = self.client.get_collections()
+            existing = any(
+                c.name == self.collection_name 
+                for c in collections.collections
+            )
+            
+            if not existing:
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=models.VectorParams(
+                        size=self.vector_size,
+                        distance=models.Distance.COSINE
+                    )
+                )
+                logger.info(f"Created collection {self.collection_name}")
+                
+        except UnexpectedResponse as e:
+            raise IndexingError(f"Qdrant connection error: {str(e)}")
+    
+    def index_document(
+        self,
+        document: Document,
+        vector: List[float],
+        metadata: Dict
+    ) -> str:
+        """Index a document in Qdrant.
+        
+        Args:
+            document: Document to index
+            vector: Document embedding vector
+            metadata: Additional metadata
+            
+        Returns:
+            The Qdrant point ID
+        """
+        try:
+            self.ensure_collection_exists()
+            
+            point_id = str(document.id)
+            payload = {
+                "document_id": document.id,
+                "user_id": document.user_id,
+                "text": document.ocr_text or "",
+                **metadata
+            }
+            
+            operation_info = self.client.upsert(
+                collection_name=self.collection_name,
                 points=[
                     models.PointStruct(
-                        id=document.id,
+                        id=point_id,
                         vector=vector,
-                        payload={
-                            "title": document.title,
-                            "content": text,
-                            "metadata": document.metadata
-                        }
+                        payload=payload
                     )
                 ]
             )
             
-            # Meilisearch full-text index
-            self.meilisearch.index("documents").add_documents([{
-                "id": document.id,
-                "title": document.title,
-                "content": text,
-                "metadata": document.metadata
-            }])
-            
-            logger.info(f"Successfully indexed document {document.id}")
+            logger.debug(
+                f"Indexed document {document.id} - {operation_info}"
+            )
+            return point_id
             
         except Exception as e:
-            logger.error(f"Failed to index document {document.id}: {e}")
-            raise
-            
-    async def delete_document(self, document_id: int):
-        """Remove document from both indexes."""
-        from loguru import logger
+            raise IndexingError(f"Indexing failed: {str(e)}")
+    
+    def search_documents(
+        self,
+        query_vector: List[float],
+        user_id: str,
+        limit: int = 10
+    ) -> List[Dict]:
+        """Search documents by similarity.
         
+        Args:
+            query_vector: Search query embedding
+            user_id: Filter by user ID
+            limit: Maximum results to return
+            
+        Returns:
+            List of matching documents with scores
+        """
         try:
-            # Qdrant
-            self.qdrant.delete(
-                collection_name="documents",
-                points=[document_id]
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                query_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value=user_id)
+                        ]
+                    ),
+                limit=limit
             )
             
-            # Meilisearch
-            self.meilisearch.index("documents").delete_document(document_id)
-            
-            logger.info(f"Successfully deleted document {document_id} from indexes")
+            return [
+                {
+                    "id": hit.id,
+                    "score": hit.score,
+                    "payload": hit.payload
+                }
+                for hit in results
+            ]
             
         except Exception as e:
-            logger.error(f"Failed to delete document {document_id} from indexes: {e}")
-            raise
-            
-    async def _get_document_embedding(self, text: str) -> list[float]:
-        """Generate document embedding vector."""
-        # TODO: Implement actual embedding generation
-        # Placeholder - replace with your embedding model
-        return [0.0] * 768
-
-
-search_service = SearchService()
-indexing_service = IndexingService()
+            raise IndexingError(f"Search failed: {str(e)}")
+    
+    def delete_document(self, document_id: str) -> None:
+        """Delete a document from the index.
+        
+        Args:
+            document_id: ID of document to remove
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(
+                    points=[document_id]
+                )
+            )
+        except Exception as e:
+            raise IndexingError(f"Deletion failed: {str(e)}")
