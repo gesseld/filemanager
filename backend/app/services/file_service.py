@@ -1,5 +1,5 @@
 """File handling service."""
-
+from .base import BaseService
 import os
 import shutil
 import uuid
@@ -14,13 +14,33 @@ from ..models.user import User
 from ..exceptions import FileStorageError
 
 
-class FileService:
+class FileService(BaseService):
     """Service for handling file operations."""
     
     def __init__(self):
+        super().__init__()
         self.storage_root = Path(settings.STORAGE_ROOT)
         self.temp_dir = self.storage_root / "temp"
         self.ensure_directories_exist()
+        
+    def health_check(self) -> dict:
+        """Check service health and storage availability."""
+        try:
+            test_file = self.temp_dir / "healthcheck.tmp"
+            with open(test_file, "w") as f:
+                f.write("healthcheck")
+            os.remove(test_file)
+            return {
+                "status": "healthy",
+                "storage_writable": True,
+                "storage_path": str(self.storage_root)
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "storage_writable": False
+            }
     
     def ensure_directories_exist(self) -> None:
         """Ensure required directories exist."""
