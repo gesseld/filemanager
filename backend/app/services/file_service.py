@@ -1,175 +1,125 @@
-"""File upload service with MIME type validation and storage management."""
+"""File handling service."""
 
 import os
+import shutil
 import uuid
-import hashlib
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
-import magic
-from loguru import logger
+from fastapi import UploadFile
+from datetime import datetime
 
-from fastapi import UploadFile, HTTPException, status
-
-from app.schemas.file import FileValidationConfig
-from app.core.config import settings
+from ..config import settings
+from ..models.document import Document
+from ..models.user import User
+from ..exceptions import FileStorageError
 
 
 class FileService:
-    """Service for handling file uploads, validation, and storage."""
+    """Service for handling file operations."""
     
     def __init__(self):
-        """Initialize file service."""
-        self.upload_dir = Path("storage/uploads")
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
-        
-    async def validate_file(self, file: UploadFile) -> Tuple[str, int]:
-        """
-        Validate file type and size.
-        
-        Args:
-            file: FastAPI UploadFile object
-            
-        Returns:
-            Tuple of (mime_type, file_size)
-            
-        Raises:
-            HTTPException: If validation fails
-        """
-        # Check if file is provided
-        if not file or not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
-            )
-            
-        # Read file content for validation
-        content = await file.read()
-        await file.seek(0)  # Reset file pointer
-        
-        # Check file size
-        file_size = len(content)
-        if file_size > FileValidationConfig.MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File size exceeds maximum allowed size of {FileValidationConfig.MAX_FILE_SIZE} bytes"
-            )
-            
-        # Validate MIME type using python-magic
-        try:
-            mime_type = magic.from_buffer(content, mime=True)
-        except Exception as e:
-            logger.error(f"Error detecting MIME type: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Unable to determine file type"
-            )
-            
-        # Check if MIME type is allowed
-        if mime_type not in FileValidationConfig.ALLOWED_MIME_TYPES:
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail=f"File type {mime_type} is not supported"
-            )
-            
-        return mime_type, file_size
-        
-    def generate_file_path(self, original_filename: str) -> Tuple[str, str]:
-        """
-        Generate unique file path for storage.
-        
-        Args:
-            original_filename: Original filename
-            
-        Returns:
-            Tuple of (storage_path, unique_filename)
-        """
-        # Generate unique filename
-        file_extension = Path(original_filename).suffix
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        
-        # Create date-based directory structure
-        date_path = Path(datetime.now().strftime("%Y/%m/%d"))
-        storage_dir = self.upload_dir / date_path
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Full storage path
-        storage_path = storage_dir / unique_filename
-        
-        return str(storage_path), str(date_path / unique_filename)
-        
-    def calculate_checksum(self, content: bytes) -> str:
-        """
-        Calculate SHA-256 checksum of file content.
-        
-        Args:
-            content: File content as bytes
-            
-        Returns:
-            SHA-256 checksum as hex string
-        """
-        return hashlib.sha256(content).hexdigest()
-        
-    async def save_file(self, file: UploadFile, mime_type: str) -> Tuple[str, str, str, int]:
-        """
-        Save uploaded file to storage.
+        self.storage_root = Path(settings.STORAGE_ROOT)
+        self.temp_dir = self.storage_root / "temp"
+        self.ensure_directories_exist()
+    
+    def ensure_directories_exist(self) -> None:
+        """Ensure required directories exist."""
+        os.makedirs(self.storage_root, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
+    
+    async def save_uploaded_file(
+        self, 
+        file: UploadFile,
+        user: User
+    ) -> Tuple[str, str]:
+        """Save an uploaded file to temporary storage.
         
         Args:
             file: FastAPI UploadFile object
-            mime_type: Validated MIME type
+            user: User who uploaded the file
             
         Returns:
-            Tuple of (storage_path, unique_filename, checksum, file_size)
+            Tuple of (file_path, file_id)
         """
-        # Read file content
-        content = await file.read()
-        
-        # Calculate checksum
-        checksum = self.calculate_checksum(content)
-        
-        # Generate storage path
-        storage_full_path, relative_path = self.generate_file_path(file.filename)
-        
-        # Save file to disk
         try:
-            with open(storage_full_path, 'wb') as f:
-                f.write(content)
+            file_id = str(uuid.uuid4())
+            ext = Path(file.filename).suffix.lower()
+            filename = f"{file_id}{ext}"
+            filepath = self.temp_dir / filename
+            
+            # Save file contents
+            with open(filepath, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
                 
-            logger.info(
-                f"File saved successfully: {file.filename} -> {storage_full_path} "
-                f"(size: {len(content)} bytes, type: {mime_type})"
-            )
-            
-            return storage_full_path, relative_path, checksum, len(content)
+            return str(filepath), file_id
             
         except Exception as e:
-            logger.error(f"Error saving file {file.filename}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to save file"
-            )
-            
-    def delete_file(self, file_path: str) -> bool:
-        """
-        Delete file from storage.
+            raise FileStorageError(f"Failed to save file: {str(e)}")
+    
+    def move_to_permanent_storage(
+        self,
+        temp_path: str,
+        document: Document
+    ) -> str:
+        """Move file from temp to permanent storage.
         
         Args:
-            file_path: Path to file
+            temp_path: Path to temporary file
+            document: Document metadata
             
         Returns:
-            True if deleted successfully, False otherwise
+            Final storage path
         """
         try:
-            full_path = self.upload_dir / file_path
-            if full_path.exists():
-                full_path.unlink()
-                logger.info(f"File deleted: {file_path}")
-                return True
-            return False
+            path = Path(temp_path)
+            if not path.exists():
+                raise FileStorageError("Source file does not exist")
+                
+            # Create user directory if needed
+            user_dir = self.storage_root / str(document.user_id)
+            os.makedirs(user_dir, exist_ok=True)
+            
+            # Create dated subdirectory
+            date_str = datetime.now().strftime("%Y/%m/%d")
+            dated_dir = user_dir / date_str
+            os.makedirs(dated_dir, exist_ok=True)
+            
+            # Move file
+            dest_path = dated_dir / path.name
+            shutil.move(str(path), str(dest_path))
+            
+            return str(dest_path)
+            
         except Exception as e:
-            logger.error(f"Error deleting file {file_path}: {e}")
-            return False
-
-
-# Global file service instance
-file_service = FileService()
+            raise FileStorageError(f"Failed to move file: {str(e)}")
+    
+    def delete_file(self, filepath: str) -> None:
+        """Delete a file from storage.
+        
+        Args:
+            filepath: Path to file to delete
+        """
+        try:
+            path = Path(filepath)
+            if path.exists():
+                path.unlink()
+        except Exception as e:
+            raise FileStorageError(f"Failed to delete file: {str(e)}")
+    
+    def get_file_path(self, document: Document) -> Optional[str]:
+        """Get full filesystem path for a document.
+        
+        Args:
+            document: Document model
+            
+        Returns:
+            Full filesystem path if exists, else None
+        """
+        if not document.storage_path:
+            return None
+            
+        path = Path(document.storage_path)
+        if not path.exists():
+            return None
+            
+        return str(path)
