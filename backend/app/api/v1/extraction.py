@@ -19,17 +19,25 @@ async def extract_text_from_document(
     db: AsyncSession = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """
-    Trigger text extraction for a specific document.
+    """Trigger text extraction for a specific document.
     
     Args:
-        document_id: ID of the document to extract text from
-        background_tasks: FastAPI background tasks
-        db: Database session
-        current_user: Current authenticated user
+        document_id: ID of document to process
+        background_tasks: FastAPI background tasks handler
+        db: Async database session
+        current_user: Authenticated user via JWT
         
     Returns:
-        Dictionary with extraction status
+        dict: {
+            "message": str,
+            "document_id": int,
+            "status": str
+        }
+        
+    Raises:
+        HTTPException: 404 if document not found
+        HTTPException: 403 if unauthorized
+        HTTPException: 500 for server errors
     """
     try:
         # Get document
