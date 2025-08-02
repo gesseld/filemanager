@@ -2,7 +2,12 @@ from app.services.base import BaseService
 from meilisearch import Client as MeiliClient
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
+from datetime import datetime
+from app.models.search_history import SearchHistory
+from app.db.session import SessionLocal
+import re
+from transformers import pipeline
 
 class SearchService(BaseService):
     def __init__(self):
@@ -23,6 +28,13 @@ class SearchService(BaseService):
         # Load embedding model
         self.embedding_model = SentenceTransformer(
             self.config.EMBEDDING_MODEL
+        )
+        
+        # Initialize NLP components
+        self.nlp = pipeline(
+            "text2text-generation",
+            model="tscholak/cxmefzzi",
+            device="cpu"
         )
         
         # Initialize indexes/collections
@@ -66,6 +78,7 @@ class SearchService(BaseService):
             return False
 
     def _init_meilisearch(self):
+        """Initialize Meilisearch index with ranking rules and settings."""
         """Initialize Meilisearch index with ranking rules"""
         try:
             self.meili_client.create_index('documents', {'primaryKey': 'id'})
@@ -78,8 +91,24 @@ class SearchService(BaseService):
                 'sort', 
                 'exactness'
             ])
-            index.update_searchable_attributes(['title', 'content'])
-            index.update_attributes_for_faceting(['tags'])
+            index.update_settings({
+                'searchableAttributes': ['title', 'content', 'tags'],
+                'filterableAttributes': [
+                    'type', 'size', 'created_date', 
+                    'owner', 'tags', 'extension', 'location'
+                ],
+                'sortableAttributes': ['created_date', 'size'],
+                'typoTolerance': {
+                    'enabled': True,
+                    'minWordSizeForTypos': {
+                        'oneTypo': 5,
+                        'twoTypos': 9
+                    }
+                },
+                'faceting': {
+                    'maxValuesPerFacet': 100
+                }
+            })
         except Exception as e:
             print(f"Meilisearch index already exists: {e}")
 
@@ -119,18 +148,52 @@ class SearchService(BaseService):
             points=points
         )
 
-    async def hybrid_search(self, query: str, limit: int = 10) -> List[Dict]:
-        """Perform hybrid search combining keyword and vector results"""
+    async def hybrid_search(
+        self,
+        query: str,
+        limit: int = 10,
+        filters: Optional[Dict] = None,
+        facets: Optional[List[str]] = None
+    ) -> List[Dict]:
+        """Perform hybrid search with advanced capabilities.
+        
+        Args:
+            query: Search query (supports advanced syntax)
+            limit: Maximum results to return
+            filters: Dictionary of filter conditions
+            facets: List of fields to compute facets for
+            
+        Returns:
+            Dictionary containing:
+            - results: List of matching documents
+            - facets: Facet counts if requested
+            - suggestions: Autocomplete suggestions
+        """
+        # Build search parameters
+        params = {
+            'limit': limit,
+            'attributesToHighlight': ['content'],
+            'highlightPreTag': '<mark>',
+            'highlightPostTag': '</mark>',
+            'showMatchesPosition': True
+        }
+        
+        # Add filters if provided
+        if filters:
+            filter_conditions = []
+            for field, value in filters.items():
+                if isinstance(value, list):
+                    filter_conditions.append(f"{field} IN {value}")
+                else:
+                    filter_conditions.append(f"{field} = {value}")
+            params['filter'] = ' AND '.join(filter_conditions)
+        
+        # Add facets if requested
+        if facets:
+            params['facets'] = facets
+            
         # Keyword search with Meilisearch
-        meili_results = self.meili_client.index('documents').search(
-            query,
-            {
-                'limit': limit,
-                'attributesToHighlight': ['content'],
-                'highlightPreTag': '<mark>',
-                'highlightPostTag': '</mark>'
-            }
-        )
+        meili_results = self.meili_client.index('documents').search(query, params)
         
         # Vector search with Qdrant
         query_embedding = self.embedding_model.encode(query).tolist()
@@ -142,7 +205,66 @@ class SearchService(BaseService):
         
         # Combine and re-rank results
         combined = self._combine_results(meili_results['hits'], qdrant_results)
-        return combined[:limit]
+        # Log search history if user is authenticated
+        if user_id:
+            async with SessionLocal() as session:
+                history = SearchHistory(
+                    user_id=user_id,
+                    query=query,
+                    result_count=len(combined[:limit]),
+                    timestamp=datetime.utcnow()
+                )
+                session.add(history)
+                await session.commit()
+        
+        return {
+            "hits": combined[:limit],
+            "facets": meili_results.get('facets', {}),
+            "query_suggestions": self._generate_suggestions(query)
+        }
+
+    def process_natural_language_query(self, query: str) -> str:
+        """Convert natural language query to search syntax."""
+        try:
+            # Simple pattern matching for common queries
+            if re.match(r"^(find|show|get) me", query, re.I):
+                query = re.sub(r"^(find|show|get) me", "", query, flags=re.I).strip()
+            
+            # Use NLP model for complex queries
+            if len(query.split()) > 4:  # Only use NLP for longer queries
+                processed = self.nlp(
+                    f"translate English to SQL: {query}",
+                    max_length=128
+                )
+                query = processed[0]['generated_text']
+                query = re.sub(r"SELECT .*? FROM", "", query, flags=re.I)
+                query = re.sub(r"WHERE (.*?)(?:ORDER BY|GROUP BY|LIMIT|$).*", r"\1", query)
+                query = query.strip()
+            
+            return query
+        except Exception as e:
+            self.logger.error(f"Failed to process natural language query: {e}")
+            return query
+
+    def _generate_suggestions(self, query: str) -> List[str]:
+        """Generate autocomplete suggestions for a query."""
+        if len(query) < 3:
+            return []
+            
+        try:
+            suggestions = self.meili_client.index('documents').search(query, {
+                'limit': 5,
+                'attributesToRetrieve': [],
+                'showMatchesPosition': False,
+                'attributesToHighlight': [],
+                'attributesToCrop': [],
+                'cropLength': 0,
+                'matches': False
+            })
+            return [hit['_formatted']['title'] for hit in suggestions['hits']]
+        except Exception as e:
+            self.logger.error(f"Failed to generate suggestions: {e}")
+            return []
 
     def _combine_results(self, keyword_results: List, vector_results: List) -> List[Dict]:
         """Combine and re-rank results from both search systems"""

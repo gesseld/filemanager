@@ -45,7 +45,10 @@ async def health_check():
 async def hybrid_search(
     query: str,
     mode: str = "hybrid",
-    limit: int = 10
+    limit: int = 10,
+    filters: Optional[str] = None,
+    facets: Optional[str] = None,
+    natural: bool = False
 ):
     """
     Perform hybrid search combining keyword and vector results
@@ -61,8 +64,27 @@ async def hybrid_search(
             detail="Invalid search mode. Must be one of: hybrid, keyword, vector"
         )
         
-    results = await search_service.hybrid_search(query, limit)
-    return {"results": results}
+    # Process natural language query if requested
+    if natural:
+        query = search_service.process_natural_language_query(query)
+    
+    # Parse filters and facets
+    filter_dict = json.loads(filters) if filters else None
+    facet_list = facets.split(',') if facets else None
+    
+    results = await search_service.hybrid_search(
+        query=query,
+        limit=limit,
+        filters=filter_dict,
+        facets=facet_list
+    )
+    
+    return {
+        "results": results.get('hits', []),
+        "facets": results.get('facets', {}),
+        "query_suggestions": results.get('query_suggestions', []),
+        "processed_query": query if natural else None
+    }
 
 
 if __name__ == "__main__":
