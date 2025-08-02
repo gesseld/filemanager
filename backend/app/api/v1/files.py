@@ -1,271 +1,236 @@
-"""File upload API endpoints."""
+"""File upload and management API endpoints."""
 
-from typing import Optional
+import logging
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, status
+from fastapi.responses import JSONResponse
+from typing import List
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, status
-from sqlalchemy.orm import Session
-
-from app.db.session import get_db
-from app.models.document import Document
 from app.models.user import User
-from app.schemas.file import FileUploadResponse, FileUploadError
-from app.services.file_service import file_service
-from app.core.config import settings
-
-# For now, we'll use a mock user since authentication isn't implemented yet
-# In production, this would be replaced with proper authentication
-def get_current_user(db: Session = Depends(get_db)) -> User:
-    """Get current user - temporary mock implementation."""
-    # TODO: Replace with proper authentication
-    user = db.query(User).first()
-    if not user:
-        # Create a mock user if none exists
-        user = User(
-            email="admin@example.com",
-            username="admin",
-            full_name="Admin User",
-            is_active=True
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    return user
-
+from app.services.file_service import FileService
+from app.services.ocr_wsl import OCRService
+from app.services.indexing_service import IndexingService
+from app.services.tagging import TaggingService
+from app.api.dependencies import get_current_user
 
 router = APIRouter(prefix="/files", tags=["files"])
+logger = logging.getLogger(__name__)
 
-
-@router.post(
-    "/upload",
-    response_model=FileUploadResponse,
-    status_code=status.HTTP_201_CREATED,
-    responses={
-        400: {"model": FileUploadError, "description": "Bad Request"},
-        413: {"model": FileUploadError, "description": "File Too Large"},
-        415: {"model": FileUploadError, "description": "Unsupported Media Type"},
-        422: {"model": FileUploadError, "description": "Unprocessable Entity"},
-        500: {"model": FileUploadError, "description": "Internal Server Error"},
-    }
-)
-async def upload_file(
-    file: UploadFile = File(..., description="File to upload"),
-    title: Optional[str] = Form(None, description="Document title"),
-    description: Optional[str] = Form(None, description="Document description"),
-    db: Session = Depends(get_db),
+@router.post("/upload", status_code=status.HTTP_201_CREATED)
+async def upload_files(
+    files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Upload a file and create a document record.
-    
-    - Validates file type using python-magic
-    - Stores file in storage/uploads/{uuid} directory
-    - Creates Document record with status="pending"
-    
-    Args:
-        file: The file to upload
-        title: Optional document title (defaults to filename)
-        description: Optional document description
-        db: Database session
-        current_user: Current authenticated user
-        
-    Returns:
-        FileUploadResponse: Details of the uploaded file
-        
-    Raises:
-        HTTPException: If validation or upload fails
-    """
-    try:
-        # Validate file
-        mime_type, file_size = await file_service.validate_file(file)
-        
-        # Save file to storage
-        storage_full_path, relative_path, checksum, file_size = await file_service.save_file(
-            file, mime_type
-        )
-        
-        # Check for duplicate files using checksum
-        existing_doc = db.query(Document).filter(Document.checksum == checksum).first()
-        if existing_doc:
-            # Clean up the newly saved file since it's a duplicate
-            file_service.delete_file(relative_path)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"File already exists with ID: {existing_doc.id}"
+    """Upload and process multiple files."""
+    file_service = FileService()
+    ocr_service = OCRService()
+    indexing_service = IndexingService()
+    tagging_service = TaggingService()
+
+    results = []
+    for file in files:
+        try:
+            # Save file temporarily
+            file_path, file_id = await file_service.save_uploaded_file(file, current_user)
+
+            # Create document record
+            document = Document(
+                id=file_id,
+                user_id=current_user.id,
+                filename=file.filename,
+                content_type=file.content_type,
+                size=file.size
             )
-        
-        # Create document record
-        document = Document(
-            title=title or file.filename,
-            description=description,
-            filename=file.filename,
-            file_path=relative_path,
-            file_size=file_size,
-            mime_type=mime_type,
-            checksum=checksum,
-            status="pending",  # Set status to pending for processing
-            owner_id=current_user.id
-        )
-        
-        db.add(document)
-        db.commit()
-        db.refresh(document)
-        
-        return FileUploadResponse(
-            id=document.id,
-            title=document.title,
-            filename=document.filename,
-            file_path=document.file_path,
-            file_size=document.file_size,
-            mime_type=document.mime_type,
-            status=document.status,
-            created_at=document.created_at
-        )
-        
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        # Log unexpected errors
-        from loguru import logger
-        logger.error(f"Unexpected error during file upload: {e}")
+
+            # Process file (OCR, indexing, tagging)
+            if file.content_type.startswith(('image/', 'application/pdf')):
+                try:
+                    # Extract text
+                    text, metadata = await ocr_service.extract_image_text(file_path)
+                    document.ocr_text = text
+
+                    # Generate tags
+                    tags = tagging_service.tag_document(document)
+                    document.metadata.keywords = tags
+
+                    # Index document
+                    vector = await generate_embedding(text)
+                    indexing_service.index_document(document, vector, {
+                        "original_filename": file.filename,
+                        "content_type": file.content_type
+                    })
+
+                except Exception as e:
+                    logger.error(f"Processing failed for {file.filename}: {str(e)}")
+                    document.status = DocumentStatus.FAILED
+
+            # Move to permanent storage
+            document.storage_path = file_service.move_to_permanent_storage(file_path, document)
+            document.status = DocumentStatus.INDEXED
+            await document.save()
+
+            results.append({
+                "id": file_id,
+                "filename": file.filename,
+                "status": "success"
+            })
+
+        except Exception as e:
+            logger.error(f"Upload failed for {file.filename}: {str(e)}")
+            results.append({
+                "filename": file.filename,
+                "status": "failed",
+                "error": str(e)
+            })
+
+    return JSONResponse(content={"files": results})
+
+@router.get("/{file_id}")
+async def get_file_info(
+    file_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get information about a specific file."""
+    file_service = FileService()
+    document = await Document.get(file_id)
+
+    if not document or document.user_id != current_user.id:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during file upload"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
         )
 
-
-@router.get("/upload")
-async def get_upload_info():
-    """Get information about supported file types and upload limits."""
-    from app.schemas.file import FileValidationConfig
-    
     return {
-        "max_file_size": FileValidationConfig.MAX_FILE_SIZE,
-        "supported_mime_types": list(FileValidationConfig.ALLOWED_MIME_TYPES),
-        "max_file_size_mb": FileValidationConfig.MAX_FILE_SIZE / (1024 * 1024)
+        "id": document.id,
+        "filename": document.filename,
+        "size": document.size,
+        "status": document.status,
+        "created_at": document.created_at,
+        "metadata": document.metadata.dict()
     }
 
-
-@router.delete(
-    "/{file_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    responses={
-        404: {"description": "File not found"},
-        500: {"description": "Internal server error"},
-    }
-)
+@router.delete("/{file_id}")
 async def delete_file(
-    file_id: int,
-    db: Session = Depends(get_db),
+    file_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Delete a file and all associated data.
-    
-    - Removes file from storage
-    - Deletes database record
-    - Triggers async cleanup of search indexes (Qdrant/Meilisearch)
-    
-    Args:
-        file_id: ID of the file to delete
-        db: Database session
-        current_user: Current authenticated user
-        
-    Returns:
-        HTTP 204 No Content on success
-        
-    Raises:
-        HTTPException: If file not found or deletion fails
-    """
-    try:
-        # Get document record
-        document = db.query(Document).filter(
-            Document.id == file_id,
-            Document.owner_id == current_user.id
-        ).first()
-        
-        if not document:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found"
-            )
-        
-        # Delete file from storage
-        file_service.delete_file(document.file_path)
-        
-        # Delete database record
-        db.delete(document)
-        db.commit()
-        
-        # Trigger async cleanup of search indexes
-        from tasks import cleanup_search_indexes
-        cleanup_search_indexes.delay(file_id)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        from loguru import logger
-        logger.error(f"Error deleting file {file_id}: {e}")
+    """Delete a file and its metadata."""
+    file_service = FileService()
+    document = await Document.get(file_id)
+
+    if not document or document.user_id != current_user.id:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete file"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
         )
 
-
-@router.post(
-    "/{file_id}/reindex",
-    status_code=status.HTTP_202_ACCEPTED,
-    responses={
-        404: {"description": "File not found"},
-        500: {"description": "Internal server error"},
-    }
-)
-async def reindex_file(
-    file_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Trigger reindexing of a file's content in search indexes.
-    
-    - Verifies document exists and belongs to user
-    - Triggers async reindexing task
-    - Returns immediately with 202 Accepted
-    
-    Args:
-        file_id: ID of the file to reindex
-        db: Database session
-        current_user: Current authenticated user
-        
-    Returns:
-        HTTP 202 Accepted on success
-        
-    Raises:
-        HTTPException: If file not found or reindex fails
-    """
     try:
-        # Get document record
-        document = db.query(Document).filter(
-            Document.id == file_id,
-            Document.owner_id == current_user.id
-        ).first()
-        
-        if not document:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found"
-            )
-        
-        # Trigger async reindexing
-        from tasks import reindex_document
-        reindex_document.delay(file_id)
-        
-    except HTTPException:
-        raise
+        # Delete from storage
+        if document.storage_path:
+            file_service.delete_file(document.storage_path)
+
+        # Delete from index
+        indexing_service = IndexingService()
+        indexing_service.delete_document(document.id)
+
+        # Delete document record
+        await document.delete()
+
+        return {"status": "success"}
+
     except Exception as e:
-        from loguru import logger
-        logger.error(f"Error triggering reindex for file {file_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to trigger reindex"
+            detail=f"Deletion failed: {str(e)}"
+        )
+
+@router.put("/{file_id}/metadata")
+async def update_file_metadata(
+    file_id: str,
+    metadata_update: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Update document metadata (title, description, custom tags)."""
+    document = await Document.get(file_id)
+    
+    if not document or document.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+
+    try:
+        # Update editable fields
+        if 'title' in metadata_update:
+            document.metadata.title = metadata_update['title']
+        if 'description' in metadata_update:
+            document.metadata.description = metadata_update['description']
+        if 'custom_tags' in metadata_update:
+            document.metadata.custom_tags = metadata_update['custom_tags']
+        
+        document.updated_at = datetime.utcnow()
+        await document.save()
+        
+        return {"status": "success", "updated_fields": list(metadata_update.keys())}
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Metadata update failed: {str(e)}"
+        )
+
+@router.put("/{file_id}/collection")
+async def update_file_collection(
+    file_id: str,
+    collection_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Move document to a collection/folder."""
+    document = await Document.get(file_id)
+    
+    if not document or document.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+
+    try:
+        document.collection_id = collection_id
+        document.updated_at = datetime.utcnow()
+        await document.save()
+        
+        return {"status": "success", "collection_id": collection_id}
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Collection update failed: {str(e)}"
+        )
+
+@router.post("/{file_id}/share")
+async def share_file(
+    file_id: str,
+    user_ids: List[str],
+    current_user: User = Depends(get_current_user)
+):
+    """Share document with other users."""
+    document = await Document.get(file_id)
+    
+    if not document or document.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+
+    try:
+        # Add new users to shared_with list
+        document.shared_with = list(set(document.shared_with + user_ids))
+        document.updated_at = datetime.utcnow()
+        await document.save()
+        
+        return {"status": "success", "shared_with": document.shared_with}
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Sharing failed: {str(e)}"
         )
