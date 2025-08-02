@@ -1,11 +1,10 @@
 """Text extraction service that integrates Tika and OCR services."""
-
+from .base import BaseService
 import os
 import json
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional
-from loguru import logger
 
 from sqlalchemy import select
 from app.models.document import Document
@@ -14,11 +13,12 @@ from app.services.ocr_service import ocr_service
 from app.db.session import SessionLocal
 
 
-class TextExtractionService:
+class TextExtractionService(BaseService):
     """Service for orchestrating text extraction from documents."""
     
     def __init__(self):
         """Initialize text extraction service."""
+        super().__init__()
         self.supported_image_types = {
             'image/jpeg',
             'image/png',

@@ -1,12 +1,11 @@
 """OCR service for extracting text from images using Tesseract and Mistral OCR."""
-
+from .base import BaseService
 import os
 import json
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import requests
-from loguru import logger
 import pytesseract
 from PIL import Image
 import cv2
@@ -18,14 +17,34 @@ from app.core.config import settings
 # Configure pytesseract to use WSL Tesseract
 pytesseract.tesseract_cmd = 'wsl /usr/bin/tesseract'
 
-class OCRService:
+class OCRService(BaseService):
     """Service for extracting text from images using OCR."""
     
     def __init__(self):
         """Initialize OCR service with Tesseract and Mistral configuration."""
-        self.mistral_api_key = settings.mistral_api_key
-        self.mistral_api_url = settings.mistral_api_url
+        super().__init__()
+        self.mistral_api_key = self.config.mistral_api_key
+        self.mistral_api_url = self.config.mistral_api_url
         self.timeout = 300  # 5 minutes timeout
+        
+    def health_check(self) -> dict:
+        """Check OCR service health including Tesseract availability."""
+        status = {
+            "service": "OCRService",
+            "tesseract_available": self._check_tesseract_health(),
+            "mistral_configured": bool(self.mistral_api_key),
+            "status": "healthy"
+        }
+        
+        if not status["tesseract_available"]:
+            status["status"] = "degraded"
+            status["warning"] = "Tesseract not available via WSL"
+            
+        if not status["mistral_configured"]:
+            status["status"] = "degraded"
+            status["warning"] = "Mistral API key not configured"
+            
+        return status
         
     async def extract_image_text(self, image_path: str, language: str = "eng") -> Tuple[str, Dict[str, Any]]:
         """

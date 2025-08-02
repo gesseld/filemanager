@@ -1,23 +1,69 @@
+from app.services.base import BaseService
 from meilisearch import Client as MeiliClient
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Optional
-import os
 
-class SearchService:
+class SearchService(BaseService):
     def __init__(self):
+        super().__init__()
         # Initialize Meilisearch client
-        self.meili_client = MeiliClient('http://localhost:7700', os.getenv('MEILI_MASTER_KEY', ''))
+        self.meili_client = MeiliClient(
+            self.config.MEILI_URL,
+            self.config.MEILI_MASTER_KEY
+        )
         
         # Initialize Qdrant client
-        self.qdrant_client = QdrantClient("localhost", port=6333)
+        self.qdrant_client = QdrantClient(
+            self.config.QDRANT_HOST,
+            port=self.config.QDRANT_PORT,
+            api_key=self.config.QDRANT_API_KEY
+        )
         
         # Load embedding model
-        self.embedding_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        self.embedding_model = SentenceTransformer(
+            self.config.EMBEDDING_MODEL
+        )
         
         # Initialize indexes/collections
         self._init_meilisearch()
         self._init_qdrant()
+        
+    def health_check(self) -> dict:
+        """Check search service health."""
+        status = {
+            "service": "SearchService",
+            "meilisearch_healthy": self._check_meilisearch(),
+            "qdrant_healthy": self._check_qdrant(),
+            "embedding_model_loaded": True,
+            "status": "healthy"
+        }
+        
+        if not status["meilisearch_healthy"]:
+            status["status"] = "degraded"
+            status["warning"] = "Meilisearch connection failed"
+            
+        if not status["qdrant_healthy"]:
+            status["status"] = "degraded"
+            status["warning"] = "Qdrant connection failed"
+            
+        return status
+        
+    def _check_meilisearch(self) -> bool:
+        """Check Meilisearch connection."""
+        try:
+            self.meili_client.health()
+            return True
+        except Exception:
+            return False
+            
+    def _check_qdrant(self) -> bool:
+        """Check Qdrant connection."""
+        try:
+            self.qdrant_client.get_collections()
+            return True
+        except Exception:
+            return False
 
     def _init_meilisearch(self):
         """Initialize Meilisearch index with ranking rules"""

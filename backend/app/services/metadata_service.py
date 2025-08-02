@@ -1,21 +1,51 @@
 """Enhanced file metadata extraction service."""
-
+from .base import BaseService
 import os
 import mimetypes
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 import magic
-from loguru import logger
 import hashlib
 
 
-class MetadataService:
+class MetadataService(BaseService):
     """Service for extracting comprehensive file metadata."""
     
     def __init__(self):
         """Initialize metadata service."""
-        self.upload_dir = Path("storage/uploads")
+        super().__init__()
+        self.upload_dir = Path(self.config.STORAGE_ROOT) / "uploads"
+        os.makedirs(self.upload_dir, exist_ok=True)
+        
+    def health_check(self) -> dict:
+        """Check metadata service health."""
+        try:
+            test_file = self.upload_dir / "healthcheck.tmp"
+            with open(test_file, "w") as f:
+                f.write("healthcheck")
+            os.remove(test_file)
+            return {
+                "service": "MetadataService",
+                "storage_writable": True,
+                "magic_available": self._check_magic_available(),
+                "status": "healthy"
+            }
+        except Exception as e:
+            return {
+                "service": "MetadataService",
+                "storage_writable": False,
+                "error": str(e),
+                "status": "unhealthy"
+            }
+            
+    def _check_magic_available(self) -> bool:
+        """Check if python-magic is working."""
+        try:
+            magic.from_buffer(b'test', mime=True)
+            return True
+        except Exception:
+            return False
         
     def extract_file_metadata(self, file_path: str) -> Dict[str, Any]:
         """

@@ -1,6 +1,5 @@
 """Document indexing service."""
-
-import logging
+from .base import BaseService
 from typing import Optional, List, Dict
 from datetime import datetime
 
@@ -8,23 +7,47 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from ..config import settings
 from ..models.document import Document
 from ..exceptions import IndexingError
 
-logger = logging.getLogger(__name__)
-
-class IndexingService:
+class IndexingService(BaseService):
     """Service for document indexing operations."""
     
     def __init__(self):
+        super().__init__()
         self.client = QdrantClient(
-            url=settings.QDRANT_URL,
-            api_key=settings.QDRANT_API_KEY,
-            timeout=settings.QDRANT_TIMEOUT
+            url=self.config.QDRANT_URL,
+            api_key=self.config.QDRANT_API_KEY,
+            timeout=self.config.QDRANT_TIMEOUT
         )
-        self.collection_name = settings.QDRANT_COLLECTION
-        self.vector_size = settings.EMBEDDING_SIZE
+        self.collection_name = self.config.QDRANT_COLLECTION
+        self.vector_size = self.config.EMBEDDING_SIZE
+        
+    def health_check(self) -> dict:
+        """Check Qdrant connection health."""
+        try:
+            self.client.get_collections()
+            return {
+                "service": "IndexingService",
+                "qdrant_connected": True,
+                "collection_exists": self._collection_exists(),
+                "status": "healthy"
+            }
+        except Exception as e:
+            return {
+                "service": "IndexingService",
+                "qdrant_connected": False,
+                "error": str(e),
+                "status": "unhealthy"
+            }
+            
+    def _collection_exists(self) -> bool:
+        """Check if our collection exists in Qdrant."""
+        try:
+            collections = self.client.get_collections()
+            return any(c.name == self.collection_name for c in collections.collections)
+        except Exception:
+            return False
         
     def ensure_collection_exists(self) -> None:
         """Ensure the Qdrant collection exists."""
