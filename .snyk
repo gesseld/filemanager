@@ -1,0 +1,20 @@
+# Snyk configuration file
+version: v1.25.0
+
+# Snyk CLI settings
+ignore:
+  # Add any known vulnerabilities to ignore here
+  # Example:
+  # SNYK-PYTHON-DJANGO-123456:
+  #   - '*':
+  #       reason: 'Not exploitable in our use case'
+  #       expires: '2024-12-31T23:59:59.999Z'
+
+patch: {}
+
+exclude:
+  global:
+    - tests/**
+    - docs/**
+    - scripts/**
+    - "*.md"

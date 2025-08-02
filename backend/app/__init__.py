@@ -1,0 +1,1 @@
+"""File Manager API application package."""
