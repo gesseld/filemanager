@@ -65,15 +65,15 @@ class OCRService(BaseService):
             text, metadata = await self._extract_with_tesseract(image_path, language)
             
             if text and len(text.strip()) > 10:
-                logger.info(f"Successfully extracted text using Tesseract: {len(text)} chars")
+                self.logger.info(f"Successfully extracted text using Tesseract: {len(text)} chars")
                 return text, metadata
             else:
                 # Fallback to Mistral OCR
-                logger.info("Tesseract extraction yielded poor results, falling back to Mistral OCR")
+                self.logger.info("Tesseract extraction yielded poor results, falling back to Mistral OCR")
                 return await self._extract_with_mistral(image_path, language)
                 
         except Exception as e:
-            logger.error(f"Error extracting text from image {image_path}: {e}")
+            self.logger.error(f"Error extracting text from image {image_path}: {e}")
             # Final fallback to Mistral OCR
             return await self._extract_with_mistral(image_path, language)
     
@@ -84,7 +84,7 @@ class OCRService(BaseService):
                 files = {'file': f}
                 data = {'lang': language}
                 response = requests.post(
-                    f"{TESSERACT_URL}/tesseract",
+                    f"{self.config.TESSERACT_URL}/tesseract",
                     files=files,
                     data=data,
                     timeout=self.timeout
@@ -106,7 +106,7 @@ class OCRService(BaseService):
             return text, metadata
                 
         except Exception as e:
-            logger.error(f"Tesseract extraction failed: {e}")
+            self.logger.error(f"Tesseract extraction failed: {e}")
             raise
     
     async def _extract_with_mistral(self, image_path: str, language: str) -> Tuple[str, Dict[str, Any]]:
@@ -153,11 +153,11 @@ class OCRService(BaseService):
                 'processing_time': result.get('processing_time', 0)
             }
             
-            logger.info(f"Successfully extracted text using Mistral OCR: {len(text)} chars")
+            self.logger.info(f"Successfully extracted text using Mistral OCR: {len(text)} chars")
             return text, metadata
             
         except Exception as e:
-            logger.error(f"Mistral OCR extraction failed: {e}")
+            self.logger.error(f"Mistral OCR extraction failed: {e}")
             raise
     
     def _check_tesseract_health(self) -> bool:
@@ -250,7 +250,7 @@ class OCRService(BaseService):
             return preprocessed_path
             
         except Exception as e:
-            logger.warning(f"Image preprocessing failed: {e}")
+            self.logger.warning(f"Image preprocessing failed: {e}")
             return image_path
 
 

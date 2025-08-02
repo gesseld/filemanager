@@ -78,7 +78,7 @@ class TextExtractionService(BaseService):
             elif mime_type in self.supported_image_types:
                 results.update(await self._extract_image_text(file_path))
             else:
-                logger.warning(f"Unsupported file type: {mime_type}")
+                self.logger.warning(f"Unsupported file type: {mime_type}")
                 results['text_extraction_status'] = 'unsupported'
                 results['ocr_status'] = 'unsupported'
             
@@ -88,7 +88,7 @@ class TextExtractionService(BaseService):
             return results
             
         except Exception as e:
-            logger.error(f"Error extracting text from document {document.id}: {e}")
+            self.logger.error(f"Error extracting text from document {document.id}: {e}")
             await self._update_document_status(document.id, 'failed', str(e))
             raise
     
@@ -105,7 +105,7 @@ class TextExtractionService(BaseService):
             }
             
         except Exception as e:
-            logger.error(f"Document text extraction failed: {e}")
+            self.logger.error(f"Document text extraction failed: {e}")
             return {
                 'text_extraction_status': 'failed',
                 'extracted_text': None,
@@ -128,7 +128,7 @@ class TextExtractionService(BaseService):
             }
             
         except Exception as e:
-            logger.error(f"Image text extraction failed: {e}")
+            self.logger.error(f"Image text extraction failed: {e}")
             return {
                 'text_extraction_status': 'not_required',
                 'extracted_text': None,
@@ -149,7 +149,7 @@ class TextExtractionService(BaseService):
                 document.ocr_confidence = results['ocr_confidence']
                 
                 await session.commit()
-                logger.info(f"Updated document {document_id} with extraction results")
+                self.logger.info(f"Updated document {document_id} with extraction results")
     
     async def _update_document_status(self, document_id: int, status: str, error: str = None) -> None:
         """Update document status with error information."""
@@ -190,12 +190,12 @@ class TextExtractionService(BaseService):
                         await asyncio.sleep(1)
                         
                     except Exception as e:
-                        logger.error(f"Failed to process document {document.id}: {e}")
+                        self.logger.error(f"Failed to process document {document.id}: {e}")
                 
                 return processed_count
                 
         except Exception as e:
-            logger.error(f"Error processing pending documents: {e}")
+            self.logger.error(f"Error processing pending documents: {e}")
             return 0
     
     def is_text_extraction_needed(self, mime_type: str) -> bool:

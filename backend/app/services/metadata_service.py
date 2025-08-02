@@ -108,12 +108,12 @@ class MetadataService(BaseService):
             # Add system-specific metadata
             metadata.update(self._extract_system_metadata(str(full_path), stat_info))
             
-            logger.info(f"Extracted metadata for {file_path}: {metadata['size_human']}, {mime_type}")
+            self.logger.info(f"Extracted metadata for {file_path}: {metadata['size_human']}, {mime_type}")
             
             return metadata
             
         except Exception as e:
-            logger.error(f"Error extracting metadata for {file_path}: {e}")
+            self.logger.error(f"Error extracting metadata for {file_path}: {e}")
             raise
     
     def _get_mime_type(self, file_path: str) -> str:
@@ -135,7 +135,7 @@ class MetadataService(BaseService):
                     hash_sha256.update(chunk)
             return hash_sha256.hexdigest()
         except Exception as e:
-            logger.error(f"Error calculating checksum: {e}")
+            self.logger.error(f"Error calculating checksum: {e}")
             return ""
     
     def _format_file_size(self, size_bytes: int) -> str:
@@ -176,7 +176,7 @@ class MetadataService(BaseService):
                     "image_has_transparency": img.mode in ('RGBA', 'LA') or 'transparency' in img.info
                 }
         except Exception as e:
-            logger.warning(f"Could not extract image metadata: {e}")
+            self.logger.warning(f"Could not extract image metadata: {e}")
             return {}
     
     def _extract_video_metadata(self, file_path: str) -> Dict[str, Any]:
@@ -210,7 +210,7 @@ class MetadataService(BaseService):
                     "pdf_encrypted": reader.is_encrypted
                 }
         except Exception as e:
-            logger.warning(f"Could not extract PDF metadata: {e}")
+            self.logger.warning(f"Could not extract PDF metadata: {e}")
             return {}
     
     def _extract_text_metadata(self, file_path: str) -> Dict[str, Any]:
@@ -225,7 +225,7 @@ class MetadataService(BaseService):
                     "text_encoding": 'utf-8'
                 }
         except Exception as e:
-            logger.warning(f"Could not extract text metadata: {e}")
+            self.logger.warning(f"Could not extract text metadata: {e}")
             return {}
     
     def _extract_system_metadata(self, file_path: str, stat_info) -> Dict[str, Any]:
@@ -252,7 +252,7 @@ class MetadataService(BaseService):
                 })
                 
         except Exception as e:
-            logger.debug(f"Could not extract system metadata: {e}")
+            self.logger.debug(f"Could not extract system metadata: {e}")
         
         return metadata
     

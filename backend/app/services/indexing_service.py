@@ -142,7 +142,7 @@ class IndexingService(BaseService):
                         models.FieldCondition(
                             key="user_id",
                             match=models.MatchValue(value=user_id)
-                        ]
+                        )
                     ),
                 limit=limit
             )
