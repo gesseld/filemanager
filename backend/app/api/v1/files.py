@@ -19,6 +19,66 @@ from app.core.config import settings
 router = APIRouter(prefix="/files", tags=["files"])
 logger = logging.getLogger(__name__)
 
+@router.post("/temporary", status_code=status.HTTP_200_OK)
+async def create_temporary_file(
+    file: UploadFile = File(...),
+    expires_in: int = Form(300),  # Default 5 minutes
+    current_user: User = Depends(get_current_user)
+):
+    """Create a temporary file URL for external processing."""
+    try:
+        # Save file temporarily
+        file_service = FileService()
+        file_path, file_id = await file_service.save_uploaded_file(file, current_user)
+        
+        # Generate temporary URL
+        temp_url = f"{settings.API_BASE_URL}/files/temporary/{file_id}"
+        
+        # Schedule cleanup
+        background_tasks.add_task(
+            file_service.delete_file_after_delay,
+            file_path,
+            delay=expires_in
+        )
+        
+        return {
+            "url": temp_url,
+            "expires_in": expires_in,
+            "file_id": file_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to create temporary file: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create temporary file: {str(e)}"
+        )
+
+@router.get("/temporary/{file_id}")
+async def serve_temporary_file(
+    file_id: str,
+    file_service: FileService = Depends(FileService)
+):
+    """Serve a temporary file."""
+    try:
+        file_path = file_service.get_temp_file_path(file_id)
+        if not file_path or not os.path.exists(file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found or expired"
+            )
+            
+        return FileResponse(
+            file_path,
+            media_type="application/octet-stream",
+            filename=os.path.basename(file_path)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_files(
     files: List[UploadFile] = File(...),

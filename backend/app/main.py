@@ -16,7 +16,7 @@ from loguru import logger
 
 # Import API routers
 from app.api.v1.files import router as files_router
-
+from app.api.v1.errors import router as errors_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -84,6 +84,7 @@ register_exception_handlers(app)
 
 # Include API routers
 app.include_router(files_router, prefix="/api/v1")
+app.include_router(errors_router, prefix="/api/v1")
 
 
 @app.get("/")
