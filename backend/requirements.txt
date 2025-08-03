@@ -23,7 +23,7 @@ mypy==1.7.1
 pre-commit==3.5.0
 python-magic==0.4.27
 tika==2.6.0
-requests==2.31.0
+requests==2.32.4
 pillow==10.1.0
 opencv-python==4.8.1.78
 pypdf2==3.0.1
