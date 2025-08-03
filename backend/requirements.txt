@@ -29,3 +29,4 @@ opencv-python==4.8.1.78
 pypdf2==3.0.1
 celery==5.3.4
 flower==1.2.0
+pyotp==2.9.0

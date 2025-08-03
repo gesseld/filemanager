@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Server host")
     port: int = Field(default=8000, description="Server port")
     
+    # Frontend Settings
+    frontend_url: str = Field(
+        default="http://localhost:3000",
+        description="Frontend application URL"
+    )
+    
     # CORS Settings
     cors_origins: List[str] = Field(
         default=["http://localhost:3000", "http://localhost:5173"],
@@ -45,6 +51,14 @@ class Settings(BaseSettings):
     )
     algorithm: str = Field(default="HS256", description="JWT algorithm")
     access_token_expire_minutes: int = Field(default=30, description="Token expiry")
+    
+    # Terms of Service Settings
+    tos_version: str = Field(default="1.0.0", description="Current Terms of Service version")
+    tos_required: bool = Field(default=True, description="Require ToS acceptance")
+    tos_update_url: str = Field(
+        default="https://example.com/terms",
+        description="URL to latest Terms of Service"
+    )
     
     # Redis Settings
     redis_url: str = Field(

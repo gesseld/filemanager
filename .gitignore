@@ -215,3 +215,4 @@ logs
 
 # Local development
 .local/
+.aider*
