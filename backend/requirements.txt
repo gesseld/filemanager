@@ -7,7 +7,7 @@ pydantic-settings==2.1.0
 sqlalchemy==2.0.23
 alembic==1.12.1
 redis==5.0.1
-qdrant-client==1.6.9
+qdrant-client==1.15.1
 meilisearch==0.28.2
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
